@@ -34,7 +34,7 @@ class BrowserAgent:
         self,
         tool_executor: ToolExecutor,
         model: str | None = None,
-        max_steps: int = 25
+        max_steps: int = 35
     ):
         self.executor = tool_executor
         self.model = model or os.getenv("MODEL_NAME", "gemini-2.5-flash")

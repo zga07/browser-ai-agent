@@ -35,14 +35,18 @@ class BrowserEngine:
             return f"Error navigating to {url}: {str(e)}"
 
     def click_element(self, selector: str) -> str:
-        """Кликает по элементу по селектору с базовой обработкой ошибок."""
-        try:
-            # Ожидаем появление элемента перед кликом
-            self.page.wait_for_selector(selector, state="visible", timeout=7000)
-            self.page.click(selector)
-            return f"Successfully clicked: {selector}"
-        except Exception as e:
-            return f"Failed to click '{selector}'. Reason: {str(e)}"
+            """Кликает по элементу с автоматическим обходом перекрывающих оверлеев."""
+            try:
+                # Сначала пробуем стандартный клик с таймаутом 5 секунд
+                self.page.click(selector, timeout=5000)
+                return f"Successfully clicked: {selector}"
+            except Exception as e:
+                # Если элемент перекрыт оверлеем/модалкой, используем принудительный клик
+                try:
+                    self.page.click(selector, force=True, timeout=3000)
+                    return f"Successfully force-clicked: {selector}"
+                except Exception:
+                    return f"Failed to click '{selector}'. Reason: {str(e)}"
 
     def type_text(self, selector: str, text: str) -> str:
         """Вводит текст в поле."""
