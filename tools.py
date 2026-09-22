@@ -1,4 +1,5 @@
-from typing import Dict, Any, Tuple
+from typing import Any
+
 from browser_engine import BrowserEngine
 from dom_processor import DOMProcessor
 
@@ -166,7 +167,7 @@ class ToolExecutor:
             "pay", "buy", "order", "checkout", "delete", "purchase"
         ]
 
-    def _security_check(self, description: str, selector: str) -> Tuple[bool, str]:
+    def _security_check(self, description: str, selector: str) -> tuple[bool, str]:
         """
         Security Layer: проверяет, является ли действие деструктивным/финансовым,
         и запрашивает подтверждение у человека в консоли.
@@ -182,7 +183,7 @@ class ToolExecutor:
                 return False, "Действие отменено пользователем в целях безопасности."
         return True, ""
 
-    def execute(self, name: str, args: Dict[str, Any]) -> str:
+    def execute(self, name: str, args: dict[str, Any]) -> str:
         """Маршрутизирует вызов инструмента в соответствующий метод."""
         try:
             if name == "navigate_to_url":
@@ -229,4 +230,4 @@ class ToolExecutor:
                 return f"Unknown tool: {name}"
 
         except Exception as e:
-            return f"Error executing tool {name}: {str(e)}"
+            return f"Error executing tool {name}: {e!s}"

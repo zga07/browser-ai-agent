@@ -1,8 +1,9 @@
 from rich.console import Console
+
+from agent import BrowserAgent
 from browser_engine import BrowserEngine
 from dom_processor import DOMProcessor
 from tools import ToolExecutor
-from agent import BrowserAgent
 
 console = Console()
 

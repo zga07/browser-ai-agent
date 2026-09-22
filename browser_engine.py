@@ -1,6 +1,8 @@
 import os
 import time
-from playwright.sync_api import sync_playwright, Page, BrowserContext
+
+from playwright.sync_api import BrowserContext, Page, sync_playwright
+
 
 class BrowserEngine:
     def __init__(self, user_data_dir: str = "./browser_profile"):
@@ -32,21 +34,23 @@ class BrowserEngine:
             self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
             return f"Successfully navigated to {url}"
         except Exception as e:
-            return f"Error navigating to {url}: {str(e)}"
+            return f"Error navigating to {url}: {e!s}"
 
     def click_element(self, selector: str) -> str:
-            """Кликает по элементу с автоматическим обходом перекрывающих оверлеев."""
+            """Кликает по элементу с защитой от пустых селекторов и зависаний."""
+            # Блокируем голые неспецифичные теги
+            if selector.strip() in {"a", "span", "div", "button", "p", "input"}:
+                return f"Failed to click '{selector}'. Reason: Селектор слишком общий. Нужен уточняющий атрибут или текст."
+
             try:
-                # Сначала пробуем стандартный клик с таймаутом 5 секунд
                 self.page.click(selector, timeout=5000)
                 return f"Successfully clicked: {selector}"
             except Exception as e:
-                # Если элемент перекрыт оверлеем/модалкой, используем принудительный клик
                 try:
                     self.page.click(selector, force=True, timeout=3000)
                     return f"Successfully force-clicked: {selector}"
                 except Exception:
-                    return f"Failed to click '{selector}'. Reason: {str(e)}"
+                    return f"Failed to click '{selector}'. Reason: {e!s}"
 
     def type_text(self, selector: str, text: str) -> str:
         """Вводит текст в поле."""
@@ -55,7 +59,7 @@ class BrowserEngine:
             self.page.fill(selector, text)
             return f"Successfully typed '{text}' into {selector}"
         except Exception as e:
-            return f"Failed to type into '{selector}'. Reason: {str(e)}"
+            return f"Failed to type into '{selector}'. Reason: {e!s}"
 
     def wait(self, seconds: int) -> str:
         """Делает паузу (нужна для ожидания динамического контента)."""
@@ -63,12 +67,21 @@ class BrowserEngine:
         return f"Waited for {seconds} seconds"
 
     def take_screenshot(self, filename: str = "screenshot.png") -> str:
-        """Делает скриншот текущей страницы."""
-        try:
-            self.page.screenshot(path=filename)
-            return f"Screenshot saved as {filename}"
-        except Exception as e:
-            return f"Failed to take screenshot: {str(e)}"
+            """Делает скриншот и сохраняет его в отдельную папку screenshots/."""
+            try:
+                output_dir = "screenshots"
+                os.makedirs(output_dir, exist_ok=True)
+
+                # Берем только имя файла, исключая случайные пути
+                clean_name = os.path.basename(filename)
+                if not clean_name.endswith((".png", ".jpg", ".jpeg")):
+                    clean_name += ".png"
+
+                filepath = os.path.join(output_dir, clean_name)
+                self.page.screenshot(path=filepath, full_page=False)
+                return f"Screenshot saved to {filepath}"
+            except Exception as e:
+                return f"Failed to take screenshot: {e!s}"
 
     def close(self):
         """Корректно закрывает браузер и освобождает ресурсы."""

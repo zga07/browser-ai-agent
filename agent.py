@@ -1,10 +1,12 @@
-import os
 import json
-from typing import Any, List, cast
-from openai import OpenAI
+import os
+import time
+from typing import Any, cast
+
+from dotenv import load_dotenv
+from openai import OpenAI, RateLimitError
 from rich.console import Console
 from rich.panel import Panel
-from dotenv import load_dotenv
 
 from tools import TOOLS_SCHEMA, ToolExecutor
 
@@ -23,7 +25,7 @@ SYSTEM_PROMPT = """
    - Если клик не удался или страница изменилась, вызови `wait` на 2-3 секунды или снова исследуй разметку через `query_dom`.
    - Если появилось всплывающее окно (баннер, выбор региона, cookie-нотис), найди кнопку закрытия через `query_dom` и нажми её.
 3. Безопасность:
-   - Для действий с оплатой, списанием средств или удалением данных всегда указывай понятное описание в поле `description` инструмента `click_element`, чтобы сработал Security Layer.
+   - Для действий с оплатой, списанием средств или оформлением заказа всегда указывай понятное описание в поле `description` инструмента `click_element`, чтобы сработал Security Layer.
 4. Завершение:
    - Когда цель достигнута (например, товар добавлен в корзину или найдены нужные данные), обязательно вызови инструмент `finish_task` с подробным итогом.
 """
@@ -43,12 +45,12 @@ class BrowserAgent:
             api_key=os.getenv("OPENAI_API_KEY"),
             base_url=os.getenv("OPENAI_BASE_URL")
         )
-        self.messages: List[Any] = [
+        self.messages: list[Any] = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
 
     def run(self, user_goal: str):
-        """Запускает автономный цикл решения задачи."""
+        """Запускает автономный цикл решения задачи с защитой от лимитов и зацикливания."""
         self.messages.append({"role": "user", "content": user_goal})
         console.print(Panel(f"[bold green]Новая задача:[/bold green] {user_goal}", title="Browser Agent"))
 
@@ -56,34 +58,56 @@ class BrowserAgent:
         while step < self.max_steps:
             step += 1
 
-            try:
-                # 1. Запрос к LLM с передачей истории и схемы инструментов
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=cast(Any, self.messages),
-                    tools=cast(Any, TOOLS_SCHEMA),
-                    tool_choice="auto"
-                )
-            except Exception as e:
-                console.print(f"[bold red]Ошибка обращения к LLM API:[/bold red] {str(e)}")
+            # Троттлинг: пауза между шагами для соблюдения лимитов RPM
+            time.sleep(2.0)
+
+            response = None
+            # Retry loop на случай превышения лимитов запросов (HTTP 429)
+            response = None
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=cast(Any, self.messages),
+                        tools=cast(Any, TOOLS_SCHEMA),
+                        tool_choice="auto"
+                    )
+                    break
+                except RateLimitError:
+                    wait_sec = 15
+                    console.print(f"[yellow]Лимит запросов (429). Ждём {wait_sec} сек... (попытка {attempt + 1}/{max_retries})[/yellow]")
+                    time.sleep(wait_sec)
+                except Exception as e:
+                    # Если это временная перегрузка серверов 503 или сбой сети — ждём и повторяем
+                    if attempt < max_retries - 1:
+                        wait_sec = 5
+                        console.print(f"[yellow]Сервер временно перегружен (503/сеть). Повтор через {wait_sec} сек... (попытка {attempt + 1}/{max_retries})[/yellow]")
+                        time.sleep(wait_sec)
+                    else:
+                        console.print(f"[bold red]Не удалось связаться с LLM API после {max_retries} попыток:[/bold red] {e!s}")
+                        return
+
+            if not response:
+                console.print("[bold red]Не удалось получить ответ от API после повторных попыток.[/bold red]")
                 break
 
             response_message = response.choices[0].message
             tool_calls = response_message.tool_calls
 
-            # Добавляем ответ модели в историю в виде чистого словаря
+            # Добавляем ответ модели в историю сообщений
             self.messages.append(response_message.model_dump(exclude_none=True))
 
-            # 2. Если модель вывела обычный текст — логируем его
+            # Логируем текстовые рассуждения модели, если они есть
             if response_message.content:
                 console.print(f"\n[bold blue]Assistant:[/bold blue] {response_message.content}")
 
-            # 3. Если модель не вызывала тулы и завершила мысль
+            # Если модель не вызвала тулы и закончила мысль
             if not tool_calls:
                 console.print("\n[yellow]Агент завершил шаги без вызова инструментов.[/yellow]")
                 break
 
-            # 4. Выполнение вызванных инструментов
+            # Выполнение вызванных инструментов
             for tool_call in tool_calls:
                 func = getattr(tool_call, "function", None)
                 if not func:
@@ -97,26 +121,34 @@ class BrowserAgent:
                 except Exception:
                     arguments = {}
 
-                # Красивый структурированный вывод вызова тула
+                # Структурированное логирование шага
                 console.print(f"\n[cyan]🛠️  Using tool:[/cyan] [bold]{function_name}[/bold]")
                 console.print(f"[dim]Input:[/dim] {json.dumps(arguments, ensure_ascii=False, indent=2)}")
 
-                # Вызов инструмента через исполнитель
+                # Исполнение инструмента
                 result = self.executor.execute(function_name, arguments)
                 console.print(f"[green]Result:[/green] {result}")
 
-                # Запись результата тула обратно в контекст диалога
+                # Передача результата выполнения инструмента обратно модели
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "content": str(result)
                 })
 
-                # Если вызвана финальная функция завершения
+                # Завершение при вызове финального инструмента
                 if function_name == "finish_task":
-                    summary = arguments.get("summary", "Задача завершена.")
+                    summary = arguments.get("summary", "Задача успешно завершена.")
                     console.print(Panel(f"[bold green]Задача успешно выполнена![/bold green]\n\n{summary}", title="Отчёт агента"))
                     return
 
-        if step >= self.max_steps:
-            console.print("[bold red]Достигнут лимит шагов (max_steps). Выполнение остановлено.[/bold red]")
+            # Проверка лимита шагов с возможностью интерактивного продления
+            if step >= self.max_steps:
+                console.print(f"\n[bold yellow]Достигнут лимит шагов ({self.max_steps}). Задача еще не завершена.[/bold yellow]")
+                choice = input("Добавить еще 15 шагов для продолжения выполнения? (y/n): ").strip().lower()
+                if choice in ["y", "yes", "да"]:
+                    self.max_steps += 15
+                    continue
+                else:
+                    console.print("[bold red]Выполнение остановлено пользователем.[/bold red]")
+                    break
