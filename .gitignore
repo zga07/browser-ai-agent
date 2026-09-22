@@ -1,24 +1,22 @@
-# Виртуальное окружение
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
 venv/
 .venv/
 env/
 
-# Переменные окружения и ключи
+# Environment variables
 .env
-*.env
 
-# Профиль браузера с куками и сессиями
+# Browser profile & session artifacts
 browser_profile/
-
-# Кэш Python
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Временные скриншоты и артефакты
 *.png
 *.jpg
-*.jpeg
-downloads/
+ans*.txt
 
+# IDE / Editor
+.vscode/
+.idea/
+.zed/
 .DS_Store
