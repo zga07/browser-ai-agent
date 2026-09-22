@@ -22,10 +22,7 @@ class BrowserEngine:
         )
 
         # Берем уже открытую вкладку или создаем новую
-        if len(self.context.pages) > 0:
-            self.page: Page = self.context.pages[0]
-        else:
-            self.page: Page = self.context.new_page()
+        self.page: Page = self.context.pages[0] if self.context.pages else self.context.new_page()
 
     def navigate_to_url(self, url: str) -> str:
         """Переходит по указанному URL."""

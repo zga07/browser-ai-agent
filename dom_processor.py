@@ -74,7 +74,7 @@ EXTRACT_INTERACTIVE_ELEMENTS_JS = """
 
 
 class DOMProcessor:
-    def __init__(self, model: str = None):
+    def __init__(self, model: str | None = None):
         """
         DOM Sub-agent анализирует выжимку интерактивных элементов
         и возвращает точные селекторы для главного агента.
@@ -127,7 +127,7 @@ class DOMProcessor:
                     {"role": "user", "content": user_content}
                 ]
             )
-            return response.choices[0].message.content
+            return response.choices[0].message.content or ""
         except Exception as e:
             return f"Ошибка при работе DOM Sub-agent: {str(e)}"
 
