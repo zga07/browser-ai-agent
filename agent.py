@@ -14,20 +14,26 @@ load_dotenv()
 console = Console()
 
 SYSTEM_PROMPT = """
-Ты — автономный веб-ассистент, который управляет браузером для выполнения задач пользователя.
-Твоя цель — решить поставленную задачу от начала до конца, исследуя веб-страницы в реальном времени.
+Ты — автономный веб-ассистент, управляющий браузером для решения задач пользователя.
+Ты взаимодействуешь со страницами по числовым ID элементов [Set-of-Mark] и физическим координатам.
 
-ПРАВИЛА И СТРАТЕГИЯ:
-1. Исследование страниц:
-   - Никогда не угадывай селекторы наугад.
-   - Перед кликом или вводом текста ВСЕГДА используй инструмент `query_dom`, чтобы DOM Sub-agent нашел актуальный CSS-селектор элемента.
-2. Автономность и обработка ошибок:
-   - Если клик не удался или страница изменилась, вызови `wait` на 2-3 секунды или снова исследуй разметку через `query_dom`.
-   - Если появилось всплывающее окно (баннер, выбор региона, cookie-нотис), найди кнопку закрытия через `query_dom` и нажми её.
-3. Безопасность:
-   - Для действий с оплатой, списанием средств или оформлением заказа всегда указывай понятное описание в поле `description` инструмента `click_element`, чтобы сработал Security Layer.
-4. Завершение:
-   - Когда цель достигнута (например, товар добавлен в корзину или найдены нужные данные), обязательно вызови инструмент `finish_task` с подробным итогом.
+СТРАТЕГИЯ И ПРАВИЛА:
+1. Исследование страницы:
+   - Перед кликом или вводом текста ВСЕГДА вызывай `query_dom`, чтобы получить актуальный список элементов на экране с их числовыми ID [0], [1], [2]...
+   - Для клика используй `click_element(index=ID, description="...")`.
+   - Для ввода текста используй `type_text(index=ID, text="...")`.
+2. Специфика интернет-магазинов (Wildberries, Ozon и др.):
+   - При покупке одежды или обуви ВСЕГДА сначала выбери размер (кликни по элементу с размером: S, M, L, 48, 50 и т.д.), и только потом нажимай «Добавить в корзину» или «Купить сейчас».
+   - Если нужный товар, размер или кнопка не видны на экране — используй `scroll_page(direction="down")`, а затем снова вызови `query_dom`.
+3. Оптимизация скорости:
+   - Не вызывай `wait`, если страница уже загружена.
+   - Делай скриншот (`take_screenshot`) ТОЛЬКО перед вызовом `finish_task` или при критической ошибке.
+4. Безопасность (Security Layer):
+   - Всегда передавай понятное описание в поле `description` инструмента `click_element` (например: 'переход к оформлению заказа', 'удаление писем').
+5. Верификация и завершение:
+    - После клика по кнопкам действий (удалить, купить, очистить) ВСЕГДА вызывай `query_dom` С ПУСТЫМ ЗАПРОСОМ (`query=""`), чтобы увидеть всё всплывающее окно целиком.
+    - Если открылось модальное окно с подтверждением — найди кнопку согласия («ОК», «Да», «Подтвердить», «Продолжить») и нажми её.
+    - Вызывай `finish_task` только после того, как подтвердил действие в модальном окне и проверил, что список писем/товаров изменился.
 """
 
 
@@ -50,21 +56,18 @@ class BrowserAgent:
         ]
 
     def run(self, user_goal: str):
-        """Запускает автономный цикл решения задачи с защитой от лимитов и зацикливания."""
         self.messages.append({"role": "user", "content": user_goal})
         console.print(Panel(f"[bold green]Новая задача:[/bold green] {user_goal}", title="Browser Agent"))
 
         step = 0
         while step < self.max_steps:
             step += 1
-
-            # Троттлинг: пауза между шагами для соблюдения лимитов RPM
-            time.sleep(2.0)
+            time.sleep(1.0)
 
             response = None
-            # Retry loop на случай превышения лимитов запросов (HTTP 429)
-            response = None
-            max_retries = 3
+            max_retries = 4
+            backoff_delays = [5, 12, 20, 30]
+
             for attempt in range(max_retries):
                 try:
                     response = self.client.chat.completions.create(
@@ -75,76 +78,77 @@ class BrowserAgent:
                     )
                     break
                 except RateLimitError:
-                    wait_sec = 15
+                    wait_sec = 20
                     console.print(f"[yellow]Лимит запросов (429). Ждём {wait_sec} сек... (попытка {attempt + 1}/{max_retries})[/yellow]")
                     time.sleep(wait_sec)
                 except Exception as e:
-                    # Если это временная перегрузка серверов 503 или сбой сети — ждём и повторяем
                     if attempt < max_retries - 1:
-                        wait_sec = 5
-                        console.print(f"[yellow]Сервер временно перегружен (503/сеть). Повтор через {wait_sec} сек... (попытка {attempt + 1}/{max_retries})[/yellow]")
+                        wait_sec = backoff_delays[attempt]
+                        console.print(f"[yellow]Сервер временно занят (503/сеть). Пауза {wait_sec} сек перед повтором... (попытка {attempt + 1}/{max_retries})[/yellow]")
                         time.sleep(wait_sec)
                     else:
                         console.print(f"[bold red]Не удалось связаться с LLM API после {max_retries} попыток:[/bold red] {e!s}")
                         return
 
             if not response:
-                console.print("[bold red]Не удалось получить ответ от API после повторных попыток.[/bold red]")
+                console.print("[bold red]Не удалось получить ответ от API.[/bold red]")
                 break
 
             response_message = response.choices[0].message
             tool_calls = response_message.tool_calls
 
-            # Добавляем ответ модели в историю сообщений
             self.messages.append(response_message.model_dump(exclude_none=True))
 
-            # Логируем текстовые рассуждения модели, если они есть
             if response_message.content:
                 console.print(f"\n[bold blue]Assistant:[/bold blue] {response_message.content}")
 
-            # Если модель не вызвала тулы и закончила мысль
             if not tool_calls:
-                console.print("\n[yellow]Агент завершил шаги без вызова инструментов.[/yellow]")
+                console.print("\n[yellow]Агент завершил рассуждения без вызова инструментов.[/yellow]")
                 break
 
-            # Выполнение вызванных инструментов
             for tool_call in tool_calls:
                 func = getattr(tool_call, "function", None)
                 if not func:
                     continue
 
                 function_name = func.name
-                arguments_raw = func.arguments
-
                 try:
-                    arguments = json.loads(arguments_raw) if isinstance(arguments_raw, str) else arguments_raw
-                except Exception:
+                    arguments = json.loads(func.arguments) if isinstance(func.arguments, str) else func.arguments
+                except (json.JSONDecodeError, TypeError):
                     arguments = {}
 
-                # Структурированное логирование шага
                 console.print(f"\n[cyan]🛠️  Using tool:[/cyan] [bold]{function_name}[/bold]")
                 console.print(f"[dim]Input:[/dim] {json.dumps(arguments, ensure_ascii=False, indent=2)}")
 
-                # Исполнение инструмента
                 result = self.executor.execute(function_name, arguments)
-                console.print(f"[green]Result:[/green] {result}")
 
-                # Передача результата выполнения инструмента обратно модели
+                # Сокращаем вывод в консоль для длинных списков query_dom, чтобы не захламлять терминал
+                log_result = result[:250] + " ... [список сокращен]" if len(str(result)) > 300 else result
+                console.print(f"[green]Result:[/green] {log_result}")
+
+                # Если это был срез DOM, сохраняем его в историю
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "content": str(result)
                 })
 
-                # Завершение при вызове финального инструмента
+                # ОПТИМИЗАЦИЯ: заменяем старые простыни query_dom в истории на краткую заглушку
+                # Оставляем полным только самый свежий ответ
+                dom_count = 0
+                for msg in reversed(self.messages):
+                    if msg.get("role") == "tool" and "Интерактивные элементы" in str(msg.get("content", "")):
+                        dom_count += 1
+                        if dom_count > 1:
+                            msg["content"] = "[Срез элементов страницы успешно обработан на предыдущем шаге]"
+
                 if function_name == "finish_task":
                     summary = arguments.get("summary", "Задача успешно завершена.")
                     console.print(Panel(f"[bold green]Задача успешно выполнена![/bold green]\n\n{summary}", title="Отчёт агента"))
                     return
 
-            # Проверка лимита шагов с возможностью интерактивного продления
             if step >= self.max_steps:
-                console.print(f"\n[bold yellow]Достигнут лимит шагов ({self.max_steps}). Задача еще не завершена.[/bold yellow]")
+                console.print(f"\n[bold yellow]Достигнут лимит шагов ({self.max_steps}).[/bold yellow]")
                 choice = input("Добавить еще 15 шагов для продолжения выполнения? (y/n): ").strip().lower()
                 if choice in ["y", "yes", "да"]:
                     self.max_steps += 15

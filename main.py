@@ -7,22 +7,16 @@ from tools import ToolExecutor
 
 console = Console()
 
+
 def main():
     console.print("[bold cyan]═══════════════════════════════════════════════[/bold cyan]")
     console.print("[bold green]        AI Autonomous Browser Agent            [/bold green]")
     console.print("[bold cyan]═══════════════════════════════════════════════[/bold cyan]")
     console.print("[dim]Запуск браузера и подготовка рабочего профиля...[/dim]\n")
 
-    # 1. Инициализация браузера с постоянной сессией
     browser = BrowserEngine(user_data_dir="./browser_profile")
-
-    # 2. Инициализация DOM Sub-agent
     dom_processor = DOMProcessor()
-
-    # 3. Инициализация исполнителя инструментов и Security Layer
     executor = ToolExecutor(browser=browser, dom_processor=dom_processor)
-
-    # 4. Создание агента
     agent = BrowserAgent(tool_executor=executor)
 
     console.print("[bold yellow]Браузер готов к работе![/bold yellow]")

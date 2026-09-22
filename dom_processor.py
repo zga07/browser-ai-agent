@@ -1,118 +1,109 @@
-import json
-import os
 import re
 from typing import Any
 
-from dotenv import load_dotenv
-from openai import OpenAI
 from playwright.sync_api import Page
 
-load_dotenv()
-
-EXTRACT_INTERACTIVE_ELEMENTS_JS = """
+EXTRACT_SET_OF_MARK_JS = """
 () => {
+    // 1. Очищаем старые маркеры
+    document.querySelectorAll('[data-agent-id]').forEach(el => el.removeAttribute('data-agent-id'));
+
     function isVisible(el) {
         if (!el) return false;
         const style = window.getComputedStyle(el);
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
         const rect = el.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
+        return rect.width > 3 && rect.height > 3 &&
+               rect.bottom >= 0 && rect.top <= window.innerHeight &&
+               rect.right >= 0 && rect.left <= window.innerWidth;
     }
 
     function cleanText(str) {
         return (str || '').trim().replace(/\\s+/g, ' ');
     }
 
-    function getSelector(el) {
-            // Безопасная запись ID в кавычках, чтобы двоеточия Gmail не ломали CSS-парсер
-            if (el.id) return `[id="${el.id.replace(/"/g, '\\\\"')}"]`;
-
-            const testId = el.getAttribute('data-testid');
-            if (testId) return `[data-testid="${testId}"]`;
-
-            const tooltip = el.getAttribute('data-tooltip');
-            if (tooltip) return `[data-tooltip="${tooltip}"]`;
-
-            const title = el.getAttribute('title');
-            if (title) return `[title="${title}"]`;
-
-            const ariaLabel = el.getAttribute('aria-label');
-            const tag = el.tagName.toLowerCase();
-            if (ariaLabel) return `${tag}[aria-label="${ariaLabel}"]`;
-
-            // Специфика Gmail и SPA: ссылки с хэшем (#spam, #inbox, #trash)
-            if (tag === 'a') {
-                const href = el.getAttribute('href') || '';
-                if (href.includes('#')) {
-                    const hash = href.split('#')[1];
-                    if (hash) return `a[href*="#${hash}"]`;
-                }
-            }
-
-            const text = cleanText(el.innerText || el.textContent || el.value || '').slice(0, 35);
-
-            // Проверяем интерактивного родителя
-            const parentBtn = el.closest('button, a, [role="button"], [role="menuitem"]');
-            if (parentBtn && parentBtn !== el) {
-                if (parentBtn.id) return `[id="${parentBtn.id.replace(/"/g, '\\\\"')}"]`;
-                const pTooltip = parentBtn.getAttribute('data-tooltip');
-                if (pTooltip) return `[data-tooltip="${pTooltip}"]`;
-                const pAria = parentBtn.getAttribute('aria-label');
-                if (pAria) return `[aria-label="${pAria}"]`;
-                const pTitle = parentBtn.getAttribute('title');
-                if (pTitle) return `[title="${pTitle}"]`;
-                const parentText = cleanText(parentBtn.innerText || parentBtn.textContent || '').slice(0, 35);
-                if (parentText) {
-                    return `text="${parentText.replace(/"/g, '\\\\"')}"`;
-                }
-            }
-
-            if (text) {
-                if (tag === 'button') return `button:has-text("${text.replace(/"/g, '\\\\"')}")`;
-                if (tag === 'a') return `a:has-text("${text.replace(/"/g, '\\\\"')}")`;
-                return `text="${text.replace(/"/g, '\\\\"')}"`;
-            }
-
-            const placeholder = el.getAttribute('placeholder');
-            if (placeholder) return `[placeholder="${placeholder}"]`;
-
-            return '';
-        }
-
     const interactiveSelectors = [
         'button', 'a[href]', 'input', 'textarea', 'select',
         '[role="button"]', '[role="link"]', '[role="menuitem"]', '[role="tab"]',
-        '[data-tooltip]', '[tabindex]:not([tabindex="-1"])'
+        '[role="checkbox"]', '[role="radio"]', '[role="option"]',
+        '[data-testid]', '[data-tooltip]', '[onclick]', '[tabindex]:not([tabindex="-1"])'
     ];
 
-    const rawElements = Array.from(document.querySelectorAll(interactiveSelectors.join(', ')));
+    // 1. Проверяем наличие активных модальных окон
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog, [aria-modal="true"]'))
+        .filter(isVisible);
+
+    let rawElements = [];
+
+    // Приоритет №1: интерактивные элементы внутри модального окна ставим в НАЧАЛО
+    if (dialogs.length > 0) {
+        for (const d of dialogs) {
+            const modalBtns = Array.from(d.querySelectorAll(interactiveSelectors.join(', ')));
+            rawElements.push(...modalBtns);
+        }
+    }
+
+    // Приоритет №2: остальные интерактивные элементы страницы
+    rawElements.push(...Array.from(document.querySelectorAll(interactiveSelectors.join(', '))));
+
+    // Дополнительно ищем кликабельные элементы с pointer
+    const allDivsAndSpans = Array.from(document.querySelectorAll('div, span, li, label'));
+    for (const el of allDivsAndSpans) {
+        if (rawElements.length >= 150) break;
+        if (window.getComputedStyle(el).cursor === 'pointer' && !rawElements.includes(el)) {
+            rawElements.push(el);
+        }
+    }
+
+    // Убираем дубликаты с сохранением приоритета модалок
+    rawElements = Array.from(new Set(rawElements));
+
     const result = [];
     let counter = 0;
 
     for (const el of rawElements) {
         if (!isVisible(el)) continue;
 
-        const text = cleanText(el.innerText || el.textContent || el.value || '').slice(0, 80);
-        const ariaLabel = el.getAttribute('aria-label') || '';
-        const title = el.getAttribute('title') || '';
-        const tooltip = el.getAttribute('data-tooltip') || '';
-        const placeholder = el.getAttribute('placeholder') || '';
-        const selector = getSelector(el);
-
-        // Отбрасываем элементы, для которых не удалось построить надежный селектор
-        if (!selector || (!text && !placeholder && !ariaLabel && !title && !tooltip && !el.id)) {
+        // Исключаем дочерние элементы уже учтенных кнопок/ссылок
+        const parentInteractive = el.parentElement ? el.parentElement.closest('button, a[href], [role="button"]') : null;
+        if (parentInteractive && parentInteractive !== el && isVisible(parentInteractive)) {
             continue;
         }
 
-        const label = text || ariaLabel || title || tooltip || placeholder;
+        const rect = el.getBoundingClientRect();
+        const centerX = Math.round(rect.left + rect.width / 2);
+        const centerY = Math.round(rect.top + rect.height / 2);
+
+        // Назначаем атрибут в DOM для резервного клика
+        el.setAttribute('data-agent-id', String(counter));
+
+        const tag = el.tagName.toLowerCase();
+        let text = cleanText(el.innerText || el.textContent || el.value || '');
+        const placeholder = el.getAttribute('placeholder') || '';
+        const ariaLabel = el.getAttribute('aria-label') || '';
+        const title = el.getAttribute('title') || '';
+        const role = el.getAttribute('role') || '';
+
+        let label = text;
+        if (!label) label = ariaLabel || title || placeholder;
+        if (label.length > 70) label = label.slice(0, 70) + '...';
+
+        if (!label && !placeholder && tag !== 'input') continue;
 
         result.push({
-            id: counter++,
-            selector: selector,
-            label: label
+            id: counter,
+            tag: tag,
+            role: role,
+            label: label,
+            placeholder: placeholder,
+            x: centerX,
+            y: centerY,
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
         });
 
-        if (result.length >= 120) break;
+        counter++;
+        if (result.length >= 100) break;
     }
 
     return result;
@@ -121,71 +112,49 @@ EXTRACT_INTERACTIVE_ELEMENTS_JS = """
 
 
 class DOMProcessor:
-    def __init__(self, model: str | None = None):
-        self.model = model or os.getenv("MODEL_NAME", "gemini-2.5-flash")
-        self.client = OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_BASE_URL")
-        )
-
     def extract_elements(self, page: Page) -> list[dict[str, Any]]:
+        """Сканирует страницу через JS и размечает интерактивные элементы индексами."""
         try:
-            return page.evaluate(EXTRACT_INTERACTIVE_ELEMENTS_JS)
+            return page.evaluate(EXTRACT_SET_OF_MARK_JS)
         except Exception as e:
             return [{"error": f"Failed to extract elements: {e!s}"}]
 
-    def query_dom(self, page: Page, query: str) -> str:
+    def query_dom(self, page: Page, query: str = "") -> tuple[str, dict[int, dict[str, Any]]]:
+        """
+        Формирует текстовый список элементов вида [ID] tag: 'text'
+        и кэш элементов для прямого физического клика по координатам.
+        """
         elements = self.extract_elements(page)
 
         if not elements or ("error" in elements[0] and len(elements) == 1):
-            return "Не удалось извлечь элементы со страницы."
+            return "Не удалось извлечь элементы со страницы. Попробуй проскроллить или подождать.", {}
 
-        # Отправляем модели только ID и текстовое описание (без селекторов!)
-        simplified_elements = [
-            {"id": el["id"], "text": el["label"]}
-            for el in elements
-            if "id" in el and "label" in el
-        ]
+        elements_cache: dict[int, dict[str, Any]] = {
+            el["id"]: el for el in elements if "id" in el
+        }
 
-        system_prompt = (
-            "Ты — вспомогательный DOM Sub-agent. Твоя задача — сопоставить поисковый запрос "
-            "пользователя с элементом на веб-странице.\n"
-            "Инструкция:\n"
-            "1. Найди в переданном списке элемент, максимально подходящий по смыслу.\n"
-            "2. Верни СТРОГО одну строку в формате:\n"
-            "ID: <номер_элемента>\n"
-            "Например: ID: 5\n"
-            "3. Если ни один элемент не подходит, ответь: ID: none"
-        )
+        # Фильтрация по ключевому слову
+        filtered = elements
+        if query and query.strip():
+            words = [w.lower() for w in re.split(r"\s+", query.strip()) if len(w) > 1]
+            matched = [
+                el for el in elements
+                if any(w in el.get("label", "").lower() or w in el.get("placeholder", "").lower() for w in words)
+            ]
+            # Если по запросу ничего не нашлось — возвращаем первые 35 элементов, чтобы агент не получал пустоту
+            filtered = matched if matched else elements[:35]
 
-        user_content = (
-            f"Запрос агента: {query}\n\n"
-            f"Список элементов на странице:\n"
-            f"{json.dumps(simplified_elements, ensure_ascii=False, indent=1)}"
-        )
+        lines = []
+        for el in filtered:
+            tag_name = el.get("role") or el.get("tag", "element")
+            label = el.get("label", "").strip()
+            placeholder = el.get("placeholder", "").strip()
 
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ]
-            )
-            reply = response.choices[0].message.content or ""
+            desc = label
+            if placeholder and placeholder not in desc:
+                desc += f" (placeholder: {placeholder})"
 
-            # Ищем ID в ответе модели
-            match = re.search(r"ID:\s*(\d+)", reply, re.IGNORECASE)
-            if not match:
-                return "Подходящий элемент не найден на странице."
+            lines.append(f"[{el['id']}] {tag_name}: \"{desc}\"")
 
-            target_id = int(match.group(1))
-            matched_el = next((el for el in elements if el.get("id") == target_id), None)
-
-            if not matched_el:
-                return "Элемент с указанным ID не найден."
-
-            return f"Селектор: {matched_el['selector']} | Описание: {matched_el['label']}"
-
-        except Exception as e:
-            return f"Ошибка при работе DOM Sub-agent: {e!s}"
+        output_text = "Интерактивные элементы на экране (используй [ID] для клика/ввода):\n" + "\n".join(lines)
+        return output_text, elements_cache

@@ -1,9 +1,9 @@
+import re
 from typing import Any
 
 from browser_engine import BrowserEngine
 from dom_processor import DOMProcessor
 
-# 1. Описание инструментов (Tools Schema) для LLM
 TOOLS_SCHEMA = [
     {
         "type": "function",
@@ -15,7 +15,7 @@ TOOLS_SCHEMA = [
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "Полный адрес страницы, например 'https://lavka.yandex.ru' или 'https://hh.ru'."
+                        "description": "Полный адрес страницы, например 'https://www.wildberries.ru'."
                     }
                 },
                 "required": ["url"]
@@ -26,16 +26,15 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "query_dom",
-            "description": "Запускает DOM Sub-agent для поиска элементов на текущей странице по естественному описанию. Возвращает подходящий CSS-селектор и описание найденного элемента.",
+            "description": "Сканирует экран и возвращает список интерактивных элементов с их числовыми ID [0], [1], [2] (кнопки, ссылки, поля ввода, размеры). Вызывай перед каждым кликом или вводом!",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Что нужно найти на странице (например, 'поле поиска товаров', 'кнопка добавить в корзину', 'выбор адреса')."
+                        "description": "Необязательный поисковый фильтр (например 'поиск', 'размер', 'корзина'). Если пусто, возвращаются все элементы на экране."
                     }
-                },
-                "required": ["query"]
+                }
             }
         }
     },
@@ -43,20 +42,20 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "click_element",
-            "description": "Кликает по элементу по указанному CSS-селектору.",
+            "description": "Кликает по элементу по его числовому ID из списка query_dom, используя физические координаты.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS-селектор элемента, полученный от query_dom."
+                    "index": {
+                        "type": "integer",
+                        "description": "Числовой ID элемента из списка query_dom (например 0, 1, 5)."
                     },
                     "description": {
                         "type": "string",
-                        "description": "Краткое описание действия (например: 'клик по кнопке Оформить заказ', 'клик по товару')."
+                        "description": "Краткое описание действия для пользователя (например: 'выбор размера M', 'добавить в корзину')."
                     }
                 },
-                "required": ["selector"]
+                "required": ["index"]
             }
         }
     },
@@ -64,13 +63,13 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "type_text",
-            "description": "Вводит текст в поле ввода по CSS-селектору.",
+            "description": "Вводит текст в поле ввода по его числовому ID из query_dom.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS-селектор поля ввода."
+                    "index": {
+                        "type": "integer",
+                        "description": "Числовой ID поля ввода."
                     },
                     "text": {
                         "type": "string",
@@ -78,10 +77,31 @@ TOOLS_SCHEMA = [
                     },
                     "press_enter": {
                         "type": "boolean",
-                        "description": "Нужно ли нажать клавишу Enter после ввода текста (по умолчанию True)."
+                        "description": "Нажать ли клавишу Enter после ввода текста (по умолчанию True)."
                     }
                 },
-                "required": ["selector", "text"]
+                "required": ["index", "text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scroll_page",
+            "description": "Прокручивает страницу вниз или вверх для просмотра скрытых товаров, карточек или кнопок.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["down", "up"],
+                        "description": "Направление прокрутки: 'down' (вниз) или 'up' (вверх)."
+                    },
+                    "amount": {
+                        "type": "integer",
+                        "description": "Количество пикселей для прокрутки (по умолчанию 600)."
+                    }
+                }
             }
         }
     },
@@ -89,13 +109,13 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "wait",
-            "description": "Приостанавливает выполнение на указанное количество секунд для загрузки страницы или модального окна.",
+            "description": "Приостанавливает выполнение на 1-3 секунды для подгрузки динамического контента.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "seconds": {
                         "type": "integer",
-                        "description": "Количество секунд ожидания (рекомендуется 2-3 секунды)."
+                        "description": "Количество секунд ожидания."
                     }
                 },
                 "required": ["seconds"]
@@ -106,13 +126,13 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "take_screenshot",
-            "description": "Делает скриншот текущего состояния страницы.",
+            "description": "Делает скриншот страницы. Вызывай перед завершением задачи.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "filename": {
                         "type": "string",
-                        "description": "Имя файла для сохранения, например 'screenshot.png'."
+                        "description": "Имя файла для сохранения, например 'order_screen.png'."
                     }
                 }
             }
@@ -121,31 +141,14 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "ask_user",
-            "description": "Задает уточняющий вопрос пользователю, если не хватает данных для продолжения (например: 'Какой адрес доставки выбрать?').",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "Вопрос для пользователя."
-                    }
-                },
-                "required": ["question"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "finish_task",
-            "description": "Завершает выполнение задачи и формирует финальный отчет для пользователя.",
+            "description": "Завершает задачу и формирует итоговый отчет.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "summary": {
                         "type": "string",
-                        "description": "Итог выполнения задачи (что было найдено, добавлено в корзину, финальная сумма и статус)."
+                        "description": "Подробный итог выполнения задачи."
                     }
                 },
                 "required": ["summary"]
@@ -155,61 +158,66 @@ TOOLS_SCHEMA = [
 ]
 
 
-# 2. Исполнитель инструментов и Security Layer
 class ToolExecutor:
     def __init__(self, browser: BrowserEngine, dom_processor: DOMProcessor):
         self.browser = browser
         self.dom_processor = dom_processor
-
-        # Ключевые слова потенциально деструктивных действий (Security Layer)
+        # Ключевые корни потенциально опасных действий
         self.dangerous_keywords = [
-            "оплатить", "купить", "заказать", "удалить",
-            "pay", "buy", "order", "checkout", "delete", "purchase"
+            "оплат", "куп", "заказ", "удал", "спис", "очист",
+            "pay", "buy", "order", "checkout", "delete", "clear", "remove"
         ]
 
-    def _security_check(self, description: str, selector: str) -> tuple[bool, str]:
-        """
-        Security Layer: проверяет, является ли действие деструктивным/финансовым,
-        и запрашивает подтверждение у человека в консоли.
-        """
-        combined = f"{description} {selector}".lower()
-        is_risky = any(kw in combined for kw in self.dangerous_keywords)
-
-        if is_risky:
+    def _security_check(self, description: str) -> tuple[bool, str]:
+        desc_lower = description.lower()
+        if any(kw in desc_lower for kw in self.dangerous_keywords):
             print("\n⚠️  [SECURITY LAYER] Обнаружено чувствительное действие:")
-            print(f"👉 Действие: {description or selector}")
+            print(f"👉 Действие: {description}")
             choice = input("Подтвердить выполнение этого шага? (yes/no): ").strip().lower()
             if choice not in ["y", "yes", "да"]:
                 return False, "Действие отменено пользователем в целях безопасности."
         return True, ""
 
+    def _parse_index(self, args: dict[str, Any]) -> int:
+        val = args.get("index")
+        if val is None:
+            val = args.get("selector") or args.get("id")
+        if isinstance(val, int):
+            return val
+        match = re.search(r"\d+", str(val))
+        return int(match.group(0)) if match else 0
+
     def execute(self, name: str, args: dict[str, Any]) -> str:
-        """Маршрутизирует вызов инструмента в соответствующий метод."""
         try:
             if name == "navigate_to_url":
                 return self.browser.navigate_to_url(args["url"])
 
             elif name == "query_dom":
-                return self.dom_processor.query_dom(self.browser.page, args["query"])
+                query = args.get("query", "")
+                text_summary, cache = self.dom_processor.query_dom(self.browser.page, query)
+                self.browser.elements_cache = cache
+                return text_summary
 
             elif name == "click_element":
-                desc = args.get("description", "")
-                selector = args["selector"]
+                index = self._parse_index(args)
+                desc = args.get("description", f"клик по элементу [{index}]")
 
-                # Проверка безопасности перед кликом
-                allowed, msg = self._security_check(desc, selector)
+                allowed, msg = self._security_check(desc)
                 if not allowed:
                     return f"Action blocked: {msg}"
 
-                return self.browser.click_element(selector)
+                return self.browser.click_element_by_id(index)
 
             elif name == "type_text":
-                selector = args["selector"]
+                index = self._parse_index(args)
                 text = args["text"]
-                res = self.browser.type_text(selector, text)
-                if args.get("press_enter", True):
-                    self.browser.page.keyboard.press("Enter")
-                return res
+                press_enter = args.get("press_enter", True)
+                return self.browser.type_text_by_id(index, text, press_enter)
+
+            elif name == "scroll_page":
+                direction = args.get("direction", "down")
+                amount = args.get("amount", 600)
+                return self.browser.scroll_page(direction, amount)
 
             elif name == "wait":
                 return self.browser.wait(args.get("seconds", 2))
@@ -218,13 +226,8 @@ class ToolExecutor:
                 filename = args.get("filename", "screenshot.png")
                 return self.browser.take_screenshot(filename)
 
-            elif name == "ask_user":
-                print(f"\n❓ [Агент спрашивает]: {args['question']}")
-                answer = input("Твой ответ: ").strip()
-                return f"User answered: {answer}"
-
             elif name == "finish_task":
-                return f"Task completed: {args['summary']}"
+                return f"Task completed: {args.get('summary', 'Готово.')}"
 
             else:
                 return f"Unknown tool: {name}"
