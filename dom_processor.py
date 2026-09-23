@@ -1,4 +1,3 @@
-import re
 from typing import Any
 
 from playwright.sync_api import Page
@@ -13,7 +12,7 @@ EXTRACT_SET_OF_MARK_JS = """
         const style = window.getComputedStyle(el);
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
         const rect = el.getBoundingClientRect();
-        return rect.width > 3 && rect.height > 3 &&
+        return rect.width > 5 && rect.height > 5 &&
                rect.bottom >= 0 && rect.top <= window.innerHeight &&
                rect.right >= 0 && rect.left <= window.innerWidth;
     }
@@ -22,40 +21,34 @@ EXTRACT_SET_OF_MARK_JS = """
         return (str || '').trim().replace(/\\s+/g, ' ');
     }
 
+    // Интерактивные селекторы без шумного [data-testid]
     const interactiveSelectors = [
         'button', 'a[href]', 'input', 'textarea', 'select',
         '[role="button"]', '[role="link"]', '[role="menuitem"]', '[role="tab"]',
         '[role="checkbox"]', '[role="radio"]', '[role="option"]',
-        '[data-testid]', '[data-tooltip]', '[onclick]', '[tabindex]:not([tabindex="-1"])'
+        '[data-tooltip]', '[onclick]', '[tabindex]:not([tabindex="-1"])'
     ];
 
-    // 1. Проверяем наличие активных модальных окон
+    // Проверяем наличие активных диалоговых/модальных окон
     const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog, [aria-modal="true"]'))
         .filter(isVisible);
 
     let rawElements = [];
-
-    // Приоритет №1: интерактивные элементы внутри модального окна ставим в НАЧАЛО
     if (dialogs.length > 0) {
         for (const d of dialogs) {
-            const modalBtns = Array.from(d.querySelectorAll(interactiveSelectors.join(', ')));
-            rawElements.push(...modalBtns);
+            rawElements.push(...Array.from(d.querySelectorAll(interactiveSelectors.join(', '))));
         }
     }
-
-    // Приоритет №2: остальные интерактивные элементы страницы
     rawElements.push(...Array.from(document.querySelectorAll(interactiveSelectors.join(', '))));
 
-    // Дополнительно ищем кликабельные элементы с pointer
-    const allDivsAndSpans = Array.from(document.querySelectorAll('div, span, li, label'));
-    for (const el of allDivsAndSpans) {
+    const allClickables = Array.from(document.querySelectorAll('div, span, li, label'));
+    for (const el of allClickables) {
         if (rawElements.length >= 150) break;
         if (window.getComputedStyle(el).cursor === 'pointer' && !rawElements.includes(el)) {
             rawElements.push(el);
         }
     }
 
-    // Убираем дубликаты с сохранением приоритета модалок
     rawElements = Array.from(new Set(rawElements));
 
     const result = [];
@@ -64,9 +57,55 @@ EXTRACT_SET_OF_MARK_JS = """
     for (const el of rawElements) {
         if (!isVisible(el)) continue;
 
-        // Исключаем дочерние элементы уже учтенных кнопок/ссылок
-        const parentInteractive = el.parentElement ? el.parentElement.closest('button, a[href], [role="button"]') : null;
-        if (parentInteractive && parentInteractive !== el && isVisible(parentInteractive)) {
+        const tag = el.tagName.toLowerCase();
+        // Исключаем чисто графические и декоративные теги
+        if (tag === 'img' || tag === 'svg' || el.getAttribute('role') === 'presentation') {
+            continue;
+        }
+
+        // Исключаем дочерние элементы кнопок
+        const parentBtn = el.parentElement ? el.parentElement.closest('button, [role="button"]') : null;
+        if (parentBtn && parentBtn !== el && isVisible(parentBtn)) {
+            continue;
+        }
+
+        let role = el.getAttribute('role') || '';
+        const inputType = (el.getAttribute('type') || 'text').toLowerCase();
+
+        if (tag === 'input') {
+            if (inputType === 'radio') role = 'radio';
+            else if (inputType === 'checkbox') role = 'checkbox';
+            else if (['submit', 'button'].includes(inputType)) role = 'button';
+            else role = 'input-text';
+        } else if (tag === 'textarea') {
+            role = 'textarea';
+        }
+
+        let text = cleanText(el.innerText || el.textContent || el.value || '');
+        const placeholder = el.getAttribute('placeholder') || '';
+        const ariaLabel = el.getAttribute('aria-label') || '';
+        const title = el.getAttribute('title') || '';
+
+        // Распознавание кнопок с иконками без текста
+        if (!text && (tag === 'button' || role === 'button')) {
+            if (ariaLabel) text = ariaLabel;
+            else if (el.querySelector('svg')) text = '+ (Добавить)';
+        }
+
+        // Обогащение текста кнопок контекстом родительской карточки
+        const cardParent = el.closest('article, [class*="product"], [class*="card"], [class*="item"], [data-qa*="vacancy"]');
+        if (cardParent && (tag === 'button' || role === 'button')) {
+            const cardText = cleanText(cardParent.innerText || '');
+            const action = text || 'В корзину';
+            if (cardText && !action.includes(cardText.slice(0, 15))) {
+                text = action + ' [Товар: ' + cardText.slice(0, 45) + ']';
+            }
+        }
+
+        let label = text || ariaLabel || title || placeholder;
+        if (label.length > 90) label = label.slice(0, 90) + '...';
+
+        if (!label && !placeholder && !['input-text', 'textarea'].includes(role)) {
             continue;
         }
 
@@ -74,26 +113,13 @@ EXTRACT_SET_OF_MARK_JS = """
         const centerX = Math.round(rect.left + rect.width / 2);
         const centerY = Math.round(rect.top + rect.height / 2);
 
-        // Назначаем атрибут в DOM для резервного клика
+        // Присваиваем ID строго после всех валидаций
         el.setAttribute('data-agent-id', String(counter));
-
-        const tag = el.tagName.toLowerCase();
-        let text = cleanText(el.innerText || el.textContent || el.value || '');
-        const placeholder = el.getAttribute('placeholder') || '';
-        const ariaLabel = el.getAttribute('aria-label') || '';
-        const title = el.getAttribute('title') || '';
-        const role = el.getAttribute('role') || '';
-
-        let label = text;
-        if (!label) label = ariaLabel || title || placeholder;
-        if (label.length > 70) label = label.slice(0, 70) + '...';
-
-        if (!label && !placeholder && tag !== 'input') continue;
 
         result.push({
             id: counter,
             tag: tag,
-            role: role,
+            role: role || tag,
             label: label,
             placeholder: placeholder,
             x: centerX,
@@ -119,11 +145,8 @@ class DOMProcessor:
         except Exception as e:
             return [{"error": f"Failed to extract elements: {e!s}"}]
 
-    def query_dom(self, page: Page, query: str = "") -> tuple[str, dict[int, dict[str, Any]]]:
-        """
-        Формирует текстовый список элементов вида [ID] tag: 'text'
-        и кэш элементов для прямого физического клика по координатам.
-        """
+    def query_dom(self, page: Page) -> tuple[str, dict[int, dict[str, Any]]]:
+        """Формирует список интерактивных элементов и кэш для координатных кликов."""
         elements = self.extract_elements(page)
 
         if not elements or ("error" in elements[0] and len(elements) == 1):
@@ -133,20 +156,9 @@ class DOMProcessor:
             el["id"]: el for el in elements if "id" in el
         }
 
-        # Фильтрация по ключевому слову
-        filtered = elements
-        if query and query.strip():
-            words = [w.lower() for w in re.split(r"\s+", query.strip()) if len(w) > 1]
-            matched = [
-                el for el in elements
-                if any(w in el.get("label", "").lower() or w in el.get("placeholder", "").lower() for w in words)
-            ]
-            # Если по запросу ничего не нашлось — возвращаем первые 35 элементов, чтобы агент не получал пустоту
-            filtered = matched if matched else elements[:35]
-
         lines = []
-        for el in filtered:
-            tag_name = el.get("role") or el.get("tag", "element")
+        for el in elements:
+            role_or_tag = el.get("role") or el.get("tag", "element")
             label = el.get("label", "").strip()
             placeholder = el.get("placeholder", "").strip()
 
@@ -154,7 +166,7 @@ class DOMProcessor:
             if placeholder and placeholder not in desc:
                 desc += f" (placeholder: {placeholder})"
 
-            lines.append(f"[{el['id']}] {tag_name}: \"{desc}\"")
+            lines.append(f"[{el['id']}] {role_or_tag}: \"{desc}\"")
 
         output_text = "Интерактивные элементы на экране (используй [ID] для клика/ввода):\n" + "\n".join(lines)
         return output_text, elements_cache
