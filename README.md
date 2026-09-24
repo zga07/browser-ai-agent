@@ -29,7 +29,21 @@
 
 ## Старт проекта
 
-### 1. Установка
+### 1. Установка (Windows)
+
+```bash
+git clone https://github.com/zga07/browser-ai-agent.git
+cd browser-ai-agent
+
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned CurrentUser
+python3 -m venv venv
+.\venv\Scripts\activate
+
+pip install -r requirements.txt
+playwright install chromium
+```
+
+### 1. Установка (macOS)
 
 ```bash
 git clone https://github.com/zga07/browser-ai-agent.git
@@ -38,7 +52,7 @@ cd browser-ai-agent
 python3 -m venv venv
 source venv/bin/activate
 
-pip install playwright openai python-dotenv rich
+pip install -r requirements.txt
 playwright install chromium
 ```
 
