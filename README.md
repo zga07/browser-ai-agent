@@ -32,7 +32,7 @@
 ### 1. Установка
 
 ```bash
-git clone git@github.com:zga07/browser-ai-agent.git
+git clone https://github.com/zga07/browser-ai-agent.git
 cd browser-ai-agent
 
 python3 -m venv venv
